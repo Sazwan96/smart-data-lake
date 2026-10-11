@@ -20,6 +20,7 @@ package io.smartdatalake.config.exporter
 
 import io.smartdatalake.app.BackendClient
 import io.smartdatalake.config.SdlConfigObject.{ActionId, DataObjectId}
+import io.smartdatalake.config.exporter.ExportType.ExportType
 import io.smartdatalake.util.misc.SmartDataLakeLogger
 import io.smartdatalake.workflow.DataFrameSubFeed
 import io.smartdatalake.workflow.dataframe.{ColumnLineage, ColumnLineageDebug, GenericSchema}
@@ -29,7 +30,7 @@ import org.apache.hadoop.fs.{Path => HadoopPath}
 import org.json4s.JsonAST.JString
 import org.json4s.jackson.JsonMethods
 import org.json4s.jackson.JsonMethods.pretty
-import org.json4s.{JArray, JField, JObject, JValue}
+import org.json4s.{JArray, JField, JInt, JObject, JValue}
 
 import java.nio.file.Paths
 import java.sql.Timestamp
@@ -61,11 +62,92 @@ trait ExportWriter extends SmartDataLakeLogger {
 
   def listFiles(version: Option[String]): Seq[FileDescriptor] = throw new NotImplementedException()
 
-  def readLatestSchema(dataObjectId: DataObjectId): Option[String] = throw new NotImplementedException()
+  def readLatestSchema(dataObjectId: DataObjectId): Option[String] = readLatest(ExportType.Schema, dataObjectId)
+
+  /**
+   * List the versions of a document stored for a DataObject, see [[ExportType]].
+   * The versions are timestamps in epoch seconds. An empty list is returned if no document is stored.
+   */
+  def listVersions(tpe: ExportType, dataObjectId: DataObjectId): Seq[Long] = throw new NotImplementedException(s"${getClass.getSimpleName} does not support reading exported documents")
+
+  /**
+   * Read a given version of a document stored for a DataObject, see [[listVersions]].
+   */
+  def readVersion(tpe: ExportType, dataObjectId: DataObjectId, version: Long): Option[String] = throw new NotImplementedException(s"${getClass.getSimpleName} does not support reading exported documents")
+
+  /**
+   * List the versions of a document type for all DataObjects at once, see [[listVersions]].
+   * This avoids a request per DataObject for remote writers.
+   *
+   * @param latestOnly if true, only the latest version of each DataObject is needed.
+   * @return versions per DataObject, or None if not supported, then [[listVersions]] is used per DataObject.
+   */
+  def listAllVersions(tpe: ExportType, latestOnly: Boolean): Option[Map[DataObjectId, Seq[Long]]] = None
+
+  def readLatest(tpe: ExportType, dataObjectId: DataObjectId): Option[String] = {
+    listVersions(tpe, dataObjectId).maxOption.flatMap(readVersion(tpe, dataObjectId, _))
+  }
+
+  /**
+   * Write a given version of a document, e.g. one read from another [[ExportWriter]] with [[readVersion]].
+   */
+  def writeVersion(tpe: ExportType, document: String, dataObjectId: DataObjectId, version: Long): Unit = tpe match {
+    case ExportType.Schema => writeSchema(document, dataObjectId, version)
+    case ExportType.Stats => writeStats(document, dataObjectId, version)
+    case ExportType.Lineage => writeLineage(document, dataObjectId, version)
+    case _ => throw new IllegalArgumentException(s"$tpe is not a document type exported per DataObject")
+  }
+
+  /**
+   * False if the writer keeps only the latest version of a document, overwriting older versions.
+   */
+  def keepsHistory: Boolean = true
+
+  /**
+   * Rebuild the search index of the target over the configuration, the descriptions and the schemas, if it has one.
+   *
+   * @param version version of the configuration to index, or None for the latest version
+   * @return false if the target has no search index
+   */
+  def updateSearchIndex(version: Option[String]): Boolean = false
+
+  /**
+   * Rebuild the column lineage index of the target over the lineage documents of all DataObjects, if it has one.
+   *
+   * @return false if the target has no column lineage index
+   */
+  def updateLineageIndex(): Boolean = false
+}
+
+/**
+ * Types of exported documents.
+ */
+object ExportType extends Enumeration {
+  type ExportType = Value
+  /** resolved configuration, see [[ExportWriter.writeConfig]] */
+  val ConfigJson: Value = Value("configJson")
+  /** markdown description files, see [[ExportWriter.writeFile]] */
+  val Description: Value = Value("description")
+  /** schema of a DataObject */
+  val Schema: Value = Value("schema")
+  /** statistics of a DataObject */
+  val Stats: Value = Value("stats")
+  /** column lineage of a DataObject */
+  val Lineage: Value = Value("lineage")
+  /** state of workflow runs, see [[StateSyncEndpoint]] */
+  val State: Value = Value("state")
+
+  /** the types exported per DataObject, which are versioned */
+  val dataObjectTypes: Seq[ExportType] = Seq(Schema, Stats, Lineage)
 }
 
 
 object ExportWriter {
+
+  /**
+   * Filename of the exported configuration if it is written to a directory.
+   */
+  val configFilename = "exportedConfig.json"
 
   /**
    * create document writer depending on target uri scheme
@@ -149,6 +231,32 @@ object ExportWriter {
     }
     val plan = if (debug.plan.isEmpty) Seq() else Seq("", "Analyzed plan:") ++ debug.plan
     (header ++ inputs ++ unresolvedColumns ++ plan).mkString(System.lineSeparator) + System.lineSeparator
+  }
+
+  /**
+   * Operation listing the versions of a document type for all DataObjects of the UI backend, see
+   * [[ExportWriter.listAllVersions]]. It returns a Json object with the versions per DataObject id.
+   */
+  def allVersionsOperation(tpe: ExportType): String = s"dataobjects/$tpe/tstamps"
+
+  def allVersionsParams(latestOnly: Boolean): Map[String, String] = if (latestOnly) Map("latest" -> "true") else Map()
+
+  def parseAllVersions(content: String): Map[DataObjectId, Seq[Long]] = JsonMethods.parse(content) match {
+    case JObject(fields) => fields.map {
+      case (id, JArray(versions)) => DataObjectId(id) -> versions.collect { case JInt(v) => v.toLong }.sorted
+      case (id, _) => throw new IllegalStateException(s"Versions of DataObject $id are not a Json array")
+    }.toMap
+    case _ => throw new IllegalStateException("Versions of all DataObjects are not a Json object")
+  }
+
+  /**
+   * The UI backend returns statistics wrapped as `{"stats": ...}`, while they are uploaded unwrapped.
+   */
+  def unwrapDownloadedDocument(tpe: ExportType, content: String): String = {
+    if (tpe == ExportType.Stats) JsonMethods.parse(content) match {
+      case JObject(List(("stats", stats))) => pretty(stats)
+      case _ => content
+    } else content
   }
 
   /**

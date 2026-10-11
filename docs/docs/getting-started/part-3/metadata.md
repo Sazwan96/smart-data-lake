@@ -60,7 +60,7 @@ class ComputeDistanceTransformer extends CustomDfTransformer {
 ...
 ```
 
-To make the Scala documentation available in the UI, the Java command line tool called _ConfigJsonExporter_ 
+To make the Scala documentation available in the UI, the Java command line tool called _ExportSync_
 will export a parsed and enriched configuration as Json file, including code comments. Details follow later in this chapter.
 
 Lets now add some descriptions, tags and other metadata to our configuration files.
@@ -69,9 +69,9 @@ Lets now add some descriptions, tags and other metadata to our configuration fil
 
 Additionally, we want to create a comprehensive documentation for DataObject `btl-distances`, as the logic could need some explanation.
 For this we will write a separate markdown file. The UI will search markdown files for configuration objects according to the
-following path convention: `[dataObjects|actions|connections]/<id>.md`, below the directory passed as `--descriptionPath` to
-_ConfigJsonExporter_. In this project that directory is `viz/description`. Configure the same directory as
-`global.descriptionPath`, so that SDLB finds the column descriptions as well.
+following path convention: `[dataObjects|actions|connections]/<id>.md`, below the directory configured as
+`global.descriptionPath`. In this project that directory is `viz/description`. SDLB takes the column descriptions
+from there as well, and _ExportSync_ uploads the files to the UI backend.
 Let's edit therefore file `viz/description/dataObjects/btl-distances.md`.
 
 The existing file already contains some examples to create titles, tables and include images.
@@ -107,17 +107,69 @@ for details, in particular the compiler plugin your project needs for this to wo
 ## Generate schema and statistics metadata
 
 What would be a DataObject configuration viewer without possibility to see structured DataObject schemas.
-Using a Java command line tool called _DataObjectSchemaExporter_, schema, table statistics and column statistics can be exported as Json data for SDLB UI.
+Schemas are exported as Json data for SDLB UI by a dry-run of SDLB with `--test dry-run-with-schema-export`.
+The dry-run initializes all Actions without processing data, and its schemas include the column documentation.
+Table statistics and column statistics are exported from the catalog by a Java command line tool called _CatalogStatsExporter_.
+It can export schemas as well with `--withSchema true`, but these schemas are read from the data and lack the column documentation.
 
-To start the _DataObjectSchemaExporter_ and also the previously mentioned _ConfigJsonExporter_, execute the following command:
+To start the schema export, the _CatalogStatsExporter_ and also the configuration export with _ExportSync_, execute the following command:
 ```
 ./exportConfigSchemaStats.sh
 ```
 
 :::tip Scheduling export
 Export configuration, schema and statistics at least with every release of your data pipelines.
-For this you can easily add _ConfigJsonExporter_ and _DataObjectSchemaExporter_ command line tool in the corresponding release pipeline. 
+For this you can easily add the dry-run with schema export, _CatalogStatsExporter_ and _ExportSync_ command line tool in the corresponding release pipeline.
 :::
+
+## Export the configuration and synchronize metadata with the UI backend
+
+The Java command line tool _ExportSync_ exports the configuration, and copies the description files, the exported
+schemas, statistics and column lineage, as well as the state of the runs, to a target. `--types` selects what is
+exported:
+
+- `configJson`: the configuration resolved and enriched with the origin of the configuration objects and the
+  documentation of custom classes. It is written to file `exportedConfig.json` if the target is a directory.
+- `description`: the markdown files of `global.descriptionPath`. Files no longer existing are deleted on the
+  target. This needs a target supporting files, i.e. the UI backend.
+- `schema`, `stats`, `lineage`: the documents exported per DataObject, read from `--schemaSource`, which defaults
+  to `global.dataObjectsSchemaSource`. The versions which are newer in the source than in the target are
+  transferred, so it can be run repeatedly.
+- `state`: the state of the runs, read from the state directory given as `--stateSource`.
+
+`configJson,schema,stats,lineage` are exported by default. The target can be `uiBackend` (configured with
+`global.uiBackend`), a local directory prefixed with `localfile:`, or a Hadoop path.
+
+After synchronizing, the UI backend rebuilds its search index over the configuration, descriptions and schemas, and
+its column lineage index if column lineage was transferred. An unchanged search index is not rebuilt. Disable this
+with `--updateSearchIndex false` or `--updateLineageIndex false`. The state of the runs needs no index update, as the
+UI backend indexes it on upload.
+
+```
+# export the configuration for the local UI
+java -cp sdlb.jar io.smartdatalake.meta.configexporter.ExportSync \
+  --config ./config --types configJson --target localfile:./viz
+
+# upload configuration, descriptions, schemas, statistics and lineage exported locally, and the state of the runs
+java -cp sdlb.jar io.smartdatalake.meta.configexporter.ExportSync \
+  --config ./config --schemaSource localfile:./viz/schema --target uiBackend \
+  --types configJson,description,schema,stats,lineage,state --stateSource ./viz/state
+
+# download schemas, statistics and lineage from the UI backend
+java -cp sdlb.jar io.smartdatalake.meta.configexporter.ExportSync \
+  --config ./config --types schema,stats,lineage --schemaSource uiBackend --target localfile:./viz/schema
+```
+
+The DataObjects to synchronize are taken from the configuration, and can be filtered with `--includeRegex` and
+`--excludeRegex`. The state is synchronized per application, filtered with `--applicationRegex`, and only once
+a run has finished. `--versions` selects what is transferred: `newer` (default) transfers all versions newer
+than the latest version of the target, `latest` only the latest version of the source, and `all` every version
+missing in the target. `--dryRun` only reports what would be transferred.
+
+The state can only be uploaded to the UI backend, not downloaded from it, as the UI backend stores it in a
+different format. Between state directories it can be copied in both directions; copied state is added to the
+state index file used by the local UI only if the SDL parameter `hadoopFileStateStoreIndexAppend` is set, e.g.
+with the environment variable `SDL_HADOOP_FILE_STATE_STORE_INDEX_APPEND=true`, see [Run State](/docs/reference/runState).
 
 ## Write the metadata into the data catalog
 
@@ -165,7 +217,7 @@ As the local UI deployment is a static web application without backend service, 
 The state index file is updated at the end of each run by appending a line for the new state file.
 Therefore, you can see an SDLB run in the local UI only once it finished ordinarily (SUCCESS or FAILED), but not if the corresponding process was killed.
 
-A configuration index file is not needed as we use _ConfigJsonExporter_ command line tool. 
+A configuration index file is not needed as we use _ExportSync_ command line tool to export the configuration.
 Don't forget to re-run it in order to have configuration changes reflected in the SDLB UI.
 
 Should you need to re-create the state index file, you can use the following commands:
