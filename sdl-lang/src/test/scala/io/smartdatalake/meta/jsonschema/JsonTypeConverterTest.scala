@@ -24,8 +24,8 @@ import io.smartdatalake.meta.GenericTypeDef
 import io.smartdatalake.meta.GenericTypeUtil.attributesForCaseClass
 import io.smartdatalake.meta.jsonschema.TestEnum.TestEnum
 import io.smartdatalake.util.secrets.StringOrSecret
-import io.smartdatalake.workflow.connection.{Connection, ConnectionMetadata}
-import io.smartdatalake.workflow.dataobject.{DataObject, DataObjectMetadata, ExcelOptions}
+import io.smartdatalake.workflow.connection.{Connection, ConnectionMetadata, SnowflakeConnection}
+import io.smartdatalake.workflow.dataobject.{DataObject, DataObjectMetadata, DeltaLakeTableDataObject, ExcelOptions, IcebergTableDataObject, JdbcTableDataObject, JdbcViewDataObject, SnowflakeTableDataObject}
 import org.reflections.Reflections
 import org.scalatest.funsuite.AnyFunSuite
 
@@ -178,6 +178,10 @@ class JsonTypeConverterTest extends AnyFunSuite {
   case class TestClassWithLibraryOptions(
     @LibraryOptions("https://spark.apache.org/docs/latest/sql-data-sources-csv.html", "org.apache.spark.sql.catalyst.csv.CSVOptions")
     csvOptions: Map[String, String] = Map(),
+    @LibraryOptions("https://spark.apache.org/docs/latest/sql-data-sources-jdbc.html", "org.apache.spark.sql.execution.datasources.jdbc.JDBCOptions.jdbcOptionNames")
+    jdbcOptions: Map[String, String] = Map(),
+    @LibraryOptions("https://iceberg.apache.org/docs/latest/spark-configuration/", "org.apache.iceberg.spark.SparkReadOptions, org.apache.iceberg.spark.SparkWriteOptions")
+    icebergOptions: Map[String, String] = Map(),
     @LibraryOptions("https://example.com/options")
     otherOptions: Option[Map[String, String]] = None,
     plainOptions: Map[String, String] = Map()
@@ -192,6 +196,14 @@ class JsonTypeConverterTest extends AnyFunSuite {
     assert(csvOptions.description.exists(_.contains("[https://spark.apache.org/docs/latest/sql-data-sources-csv.html](https://spark.apache.org/docs/latest/sql-data-sources-csv.html)")))
     assert(csvOptions.properties.keySet.contains("delimiter"))
     assert(csvOptions.properties.keySet.contains("inferSchema"))
+    // with private member of a Scala object as options provider
+    val jdbcOptions = jsonTypeDef.properties("jdbcOptions").asInstanceOf[JsonMapDef]
+    assert(jdbcOptions.properties.keySet.contains("dbtable"))
+    assert(jdbcOptions.properties.keySet.contains("fetchsize"))
+    // with multiple Java classes holding String constants as options providers
+    val icebergOptions = jsonTypeDef.properties("icebergOptions").asInstanceOf[JsonMapDef]
+    assert(icebergOptions.properties.keySet.contains("split-size")) // SparkReadOptions
+    assert(icebergOptions.properties.keySet.contains("write-format")) // SparkWriteOptions
     // without options provider
     val otherOptions = jsonTypeDef.properties("otherOptions").asInstanceOf[JsonMapDef]
     assert(otherOptions.description.exists(_.contains("https://example.com/options")))
@@ -214,6 +226,17 @@ class JsonTypeConverterTest extends AnyFunSuite {
     val json = org.json4s.jackson.JsonMethods.compact(additionalOptions.toJson)
     assert(json.contains(""""properties":{"addColorColumns":{"type":"string"}"""))
     assert(json.contains(""""additionalProperties":{"type":"string"}"""))
+  }
+
+  test("library options of DataObjects and Connections list the option names of the underlying library") {
+    def optionNames(tpe: Type, attribute: String): Set[String] =
+      jsonTypeConverter.fromGenericTypeDef(getGenericTypeDef(tpe)).properties(attribute).asInstanceOf[JsonMapDef].properties.keySet
+    assert(optionNames(typeOf[JdbcTableDataObject], "jdbcOptions").contains("fetchsize"))
+    assert(optionNames(typeOf[JdbcViewDataObject], "jdbcOptions").contains("fetchsize"))
+    assert(optionNames(typeOf[DeltaLakeTableDataObject], "options").contains("replaceWhere"))
+    assert(optionNames(typeOf[IcebergTableDataObject], "options").contains("split-size"))
+    assert(optionNames(typeOf[SnowflakeTableDataObject], "sparkOptions").contains("sfwarehouse"))
+    assert(optionNames(typeOf[SnowflakeConnection], "sparkOptions").contains("sfwarehouse"))
   }
 
   private def getGenericTypeDef(tpe: Type, baseType: Option[Type] = None): GenericTypeDef = {
@@ -247,6 +270,11 @@ class JsonTypeConverterTest extends AnyFunSuite {
     val copyActionExecCondDesc = (schemaJson \ "definitions" \ "Action" \ "CopyAction" \ "properties" \ "executionCondition" \ "description").asInstanceOf[org.json4s.JString].s
     assert(copyActionExecCondDesc.contains("Optional execution condition for this action"), 
       s"CopyAction.executionCondition description should contain 'Optional execution condition for this action' but was: $copyActionExecCondDesc")
+
+    // custom keywords are prefixed with "x-" (issue #1181)
+    assert((schemaJson \ "x-version") == org.json4s.JString("test-version"))
+    assert((schemaJson \ "definitions" \ "Action" \ "FileTransferAction" \ "x-subFeedTypes").extract[Seq[String]](org.json4s.DefaultFormats, implicitly) == Seq("FileSubFeed"))
+    assert((schemaJson \ "definitions" \ "DataObject" \ "JdbcViewDataObject" \ "x-writeSubFeedTypes").extract[Seq[String]](org.json4s.DefaultFormats, implicitly) == Seq("SQLSubFeed"))
   }
 }
 

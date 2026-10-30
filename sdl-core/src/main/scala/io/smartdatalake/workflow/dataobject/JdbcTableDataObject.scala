@@ -125,7 +125,7 @@ case class JdbcTableDataObject(override val id: DataObjectId,
                                saveMode: SDLSaveMode = SDLSaveMode.Overwrite,
                                override val allowSchemaEvolution: Boolean = false,
                                connectionId: ConnectionId,
-                               @LibraryOptions("https://spark.apache.org/docs/latest/sql-data-sources-jdbc.html#data-source-option")
+                               @LibraryOptions("https://spark.apache.org/docs/latest/sql-data-sources-jdbc.html#data-source-option", "org.apache.spark.sql.execution.datasources.jdbc.JDBCOptions.jdbcOptionNames")
                                jdbcOptions: Map[String, String] = Map(),
                                virtualPartitions: Seq[String] = Seq(),
                                override val expectedPartitionsCondition: Option[String] = None,
@@ -298,8 +298,15 @@ case class JdbcTableDataObject(override val id: DataObjectId,
   /**
    * Listing virtual partitions by a "select distinct partition-columns" query
    */
+  /**
+   * True if conditions of merge options must be written as Spark SQL for the engine of the given subFeedType,
+   * see [[JdbcTableEngine.translatesMergeConditions]].
+   */
+  def isMergeConditionSparkSql(subFeedType: Type): Boolean = engine(subFeedType).translatesMergeConditions
+
   override def listPartitions(implicit context: ActionPipelineContext): Seq[PartitionValues] = {
-    if (partitions.nonEmpty) engine.listPartitions
+    // a table not yet existing has no partitions, e.g. on the first run with PartitionDiffMode
+    if (partitions.nonEmpty && isTableExisting) engine.listPartitions
     else Seq()
   }
 
@@ -490,6 +497,12 @@ case class JdbcTableDataObject(override val id: DataObjectId,
  * Implementations must have a public constructor with the JdbcTableDataObject as single parameter.
  */
 trait JdbcTableEngine extends DataObjectEngine {
+
+  /**
+   * True if this engine expects the conditions of [[SaveModeMergeOptions]] as Spark SQL and translates them to the
+   * dialect of the database, false if they are used as is and must be written in the dialect of the database.
+   */
+  def translatesMergeConditions: Boolean = false
 
   /**
    * Create a DataFrame reading the table, applying the incremental output state of the DataObject if set.

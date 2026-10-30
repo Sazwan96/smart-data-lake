@@ -20,7 +20,7 @@ package io.smartdatalake.meta
 
 import io.smartdatalake.config.{LibraryOptions, LibraryOptionsProvider}
 import io.smartdatalake.definitions.SaveModeOptions
-import io.smartdatalake.util.misc.ScaladocUtil.{extractScalaDoc, formatScaladocString, formatScaladocWithTags}
+import io.smartdatalake.util.misc.ScaladocUtil.{extractScalaDoc, formatScaladocMarkup, formatScaladocWithTags}
 import io.smartdatalake.util.misc.{ReflectionUtil, SmartDataLakeLogger}
 import io.smartdatalake.workflow.action.executionMode.ExecutionMode
 import io.smartdatalake.workflow.action.generic.transformer.{GenericDfTransformer, GenericDfsTransformer, GenericFileTransformer, ValidationRule}
@@ -168,10 +168,11 @@ private[smartdatalake] object GenericTypeUtil extends SmartDataLakeLogger {
     val name = tpe.typeSymbol.name.toString
     val scaladoc = extractScalaDoc(tpe.typeSymbol.annotations)
     val description = scaladoc.map(formatScaladocWithTags(_, tag => !(tag.isInstanceOf[Tag.Param] || tag.isInstanceOf[Tag.OtherTag])))
-    val attributes = if (tpe.typeSymbol.asClass.isCaseClass) attributesForCaseClass(tpe, scaladoc.map(_.textParams.view.mapValues(formatScaladocString).toMap).getOrElse(Map())) else Seq()
+    val attributes = if (tpe.typeSymbol.asClass.isCaseClass) attributesForCaseClass(tpe, scaladoc.map(_.tags.collect { case p: Tag.Param => p.name -> formatScaladocMarkup(p.markup) }.toMap).getOrElse(Map())) else Seq()
     // only java annotations are kept for runtime. SDLB needs to use Java @Deprecated annotation to be able to retrieve this with reflection.
     val isDeprecated = tpe.typeSymbol.annotations.exists(_.tree.tpe =:= typeOf[Deprecated])
-    GenericTypeDef(name, baseType, tpe, description, tpe.typeSymbol.asClass.isCaseClass, isDeprecated, parentTypes.toSet, attributes)
+    val subFeedTypes = if (tpe.typeSymbol.asClass.isCaseClass && baseType.isDefined) SubFeedTypeUtil.subFeedTypes(tpe) else None
+    GenericTypeDef(name, baseType, tpe, description, tpe.typeSymbol.asClass.isCaseClass, isDeprecated, parentTypes.toSet, attributes, subFeedTypes)
   }
 
   /**
@@ -230,21 +231,64 @@ private[smartdatalake] object GenericTypeUtil extends SmartDataLakeLogger {
   }
 
   /**
-   * Get the option names from a Scala object, which is either a [[LibraryOptionsProvider]] or a Spark DataSourceOptions object.
-   * Spark is accessed by reflection, so that there is no compile time dependency on a specific Spark version.
+   * Get the option names from a comma separated list of option providers. An option provider is either
+   * - a Scala object, which is a [[LibraryOptionsProvider]] or a Spark DataSourceOptions object,
+   * - a member of a Scala object holding a collection of option names, given as `<object>.<member>`,
+   * - a Java class, whose public static final String constants are the option names.
+   * Libraries are accessed by reflection, so that there is no compile time dependency on a specific library version.
    */
-  private def getLibraryOptionNames(provider: String): Seq[String] = {
-    try {
-      val module = Class.forName(provider + "$").getField("MODULE$").get(null)
-      val optionNames = module match {
-        case p: LibraryOptionsProvider => p.libraryOptionNames
-        case m => m.getClass.getMethod("getAllOptions").invoke(m).asInstanceOf[scala.collection.Set[String]].toSet
+  private def getLibraryOptionNames(providers: String): Seq[String] = {
+    providers.split(',').map(_.trim).filter(_.nonEmpty).flatMap { provider =>
+      try getOptionNamesFromProvider(provider)
+      catch {
+        case e @ (_: ReflectiveOperationException | _: IllegalStateException) =>
+          logger.warn(s"Could not get option names from options provider $provider: ${e.getClass.getSimpleName} ${e.getMessage}")
+          Set[String]()
       }
-      optionNames.toSeq.sorted
-    } catch {
-      case e: ReflectiveOperationException =>
-        logger.warn(s"Could not get option names from options provider $provider: ${e.getClass.getSimpleName} ${e.getMessage}")
-        Seq()
+    }.distinct.sorted.toSeq
+  }
+
+  private def getOptionNamesFromProvider(provider: String): Set[String] = {
+    getScalaObject(provider) match {
+      case Some(p: LibraryOptionsProvider) => p.libraryOptionNames
+      case Some(m) => m.getClass.getMethod("getAllOptions").invoke(m).asInstanceOf[scala.collection.Set[String]].toSet
+      case None =>
+        val (objectName, memberName) = provider.splitAt(provider.lastIndexOf('.'))
+        getScalaObject(objectName) match {
+          case Some(module) =>
+            readMember(module, memberName.drop(1)) match {
+              case names: scala.collection.Iterable[_] => names.map(_.toString).toSet
+              case names: java.util.Collection[_] => names.asScala.map(_.toString).toSet
+              case x => throw new IllegalStateException(s"Member $provider is not a collection of option names but ${x.getClass.getName}")
+            }
+          case None => getStringConstants(Class.forName(provider))
+        }
     }
+  }
+
+  private def getStringConstants(cls: Class[_]): Set[String] = {
+    import java.lang.reflect.Modifier
+    cls.getFields
+      .filter(f => f.getType == classOf[String] && Modifier.isStatic(f.getModifiers) && Modifier.isFinal(f.getModifiers))
+      .map(_.get(null).asInstanceOf[String])
+      .toSet
+  }
+
+  private def getScalaObject(name: String): Option[AnyRef] = {
+    try Some(Class.forName(name + "$").getField("MODULE$").get(null))
+    catch { case _: ClassNotFoundException => None }
+  }
+
+  /**
+   * Read a parameterless member of a Scala object.
+   * Scala compiles private members accessed by a companion class to methods with an expanded name `<owner>$$<member>`.
+   */
+  private def readMember(module: AnyRef, memberName: String): Any = {
+    val method = module.getClass.getDeclaredMethods
+      .filter(m => m.getParameterCount == 0 && (m.getName == memberName || m.getName.endsWith("$$" + memberName)))
+      .minByOption(_.getName.length) // prefer the exact name
+      .getOrElse(throw new NoSuchMethodException(s"${module.getClass.getName}.$memberName"))
+    method.setAccessible(true)
+    method.invoke(module)
   }
 }

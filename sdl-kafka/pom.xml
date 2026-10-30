@@ -22,7 +22,7 @@
 	<parent>
 		<groupId>io.smartdatalake</groupId>
 		<artifactId>sdl-parent</artifactId>
-        <version>3.0.0-SNAPSHOT</version>
+        <version>3.0.1-SNAPSHOT</version>
 		<relativePath>../pom.xml</relativePath>
 	</parent>
 
@@ -186,7 +186,7 @@
 		<dependency>
 			<groupId>io.smartdatalake</groupId>
 			<artifactId>embedded-kafka-schema-registry-shaded</artifactId>
-			<version>${confluent.version}-SNAPSHOT</version>
+			<version>${confluent.version}</version>
 			<scope>test</scope>
 		</dependency>
 		<dependency>

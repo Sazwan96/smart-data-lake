@@ -5,7 +5,7 @@
     <!-- this artifact contains debezium-connector-mariadb with shaded debezium-ddl-parser antlr4-runtime, as there are version conflicts for antlr4 with spark -->
     <artifactId>embedded-kafka-schema-registry-shaded</artifactId>
     <groupId>io.smartdatalake</groupId>
-    <version>8.2.0-SNAPSHOT</version><!-- this is the embedded-kafka-schema-registry version to use -->
+    <version>8.2.0</version><!-- this is the embedded-kafka-schema-registry version to use -->
     <packaging>jar</packaging>
     <name>embedded-kafka-schema-registry-shaded</name>
 
@@ -64,12 +64,12 @@
             <id>release-sonatype</id>
             <distributionManagement>
                 <snapshotRepository>
-                    <id>central</id>
+                    <id>sonatype-central</id>
                     <name>Sonatype Snapshot Repository</name>
                     <url>https://central.sonatype.com/repository/maven-snapshots/</url>
                 </snapshotRepository>
                 <repository>
-                    <id>central</id>
+                    <id>sonatype-central</id>
                     <name>Maven Central Repository</name>
                     <url>https://repo1.maven.org/maven2</url>
                 </repository>
@@ -116,10 +116,10 @@
                     <plugin>
                         <groupId>org.sonatype.central</groupId>
                         <artifactId>central-publishing-maven-plugin</artifactId>
-                        <version>0.11.0</version>
+                        <version>0.12.0</version>
                         <extensions>true</extensions>
                         <configuration>
-                            <publishingServerId>central</publishingServerId>
+                            <publishingServerId>sonatype-central</publishingServerId>
                             <autoPublish>false</autoPublish>
                             <ignorePublishedComponents>true</ignorePublishedComponents>
                         </configuration>

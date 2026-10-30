@@ -68,7 +68,7 @@ import scala.reflect.runtime.universe.Type
  * dataObjects = {
  *   int-airports {
  *     type = IcebergTableDataObject
- *     path = "~{env.basedir}/int_airports"
+ *     path = ${env.basedir}"/int_airports"
  *     table = { db = "default", name = "int_airports", primaryKey = [ident] }
  *     partitions = [country]
  *     saveMode = Merge
@@ -105,7 +105,7 @@ import scala.reflect.runtime.universe.Type
 case class IcebergTableDataObject(override val id: DataObjectId,
                                   path: Option[String] = None,
                                   override val partitions: Seq[String] = Seq(),
-                                  @LibraryOptions("https://iceberg.apache.org/docs/latest/spark-configuration/")
+                                  @LibraryOptions("https://iceberg.apache.org/docs/latest/spark-configuration/", "org.apache.iceberg.spark.SparkReadOptions, org.apache.iceberg.spark.SparkWriteOptions")
                                   options: Map[String, String] = Map(),
                                   override val schemaMin: Option[GenericSchema] = None,
                                   override var table: Table,
